@@ -120,10 +120,65 @@ dayjs.extend(localeData)
 dayjs.extend(localizedFormat)
 dayjs.extend(fixTimezoneOffset)
 
+/** A trailing UTC designator or numeric offset: `Z`, `+05:30`, `-0800`. */
+const OFFSET_DESIGNATOR = /(?:Z|[+-]\d{2}:?\d{2})$/i
+
+/**
+ * Whether a construction can bypass `dayjs.tz()` and use the plain constructor.
+ *
+ * Going through `dayjs.tz()` costs ~20us against ~143ns for a plain
+ * construction — a ~140x tax on every date this ecosystem creates. It is only
+ * safe to skip when the two provably agree, which was established empirically
+ * per input shape rather than assumed:
+ *
+ *   - NO default timezone configured. This is the decisive condition. Once one
+ *     is set, `dayjs.tz()` interprets input in THAT zone while the plain
+ *     constructor uses the machine's local zone, so nothing is safe — not even a
+ *     number or Date, because although the instant matches, the attached zone
+ *     differs and every later startOf/endOf/format diverges.
+ *   - The input carries no offset designator. `dayjs.tz()` reinterprets a
+ *     string's wall-clock fields in the target zone and IGNORES a trailing `Z`
+ *     or `+HH:MM`, so `'2026-03-02T09:00:00.000Z'` resolves to a different
+ *     instant under the two paths. That behaviour is load-bearing for this
+ *     library, so it is preserved rather than corrected here.
+ *   - Exactly zero or one argument. `dayjs.tz`'s signature is
+ *     `tz(input, timezone)` / `tz(input, format, timezone)`, so a second
+ *     argument means something entirely different from the plain constructor's
+ *     format parameter. Multi-argument calls keep the existing path.
+ */
+const canUsePlainConstructor = (args: unknown[]): boolean => {
+	if (defaultTimezone !== undefined) {
+		return false
+	}
+	if (args.length === 0) {
+		return true
+	}
+	if (args.length > 1) {
+		return false
+	}
+	const input = args.at(0)
+	if (input === undefined) {
+		return true
+	}
+	if (typeof input === 'number' || input instanceof Date) {
+		return true
+	}
+	if (dayjs.isDayjs(input)) {
+		return true
+	}
+	if (typeof input === 'string') {
+		return !OFFSET_DESIGNATOR.test(input)
+	}
+	return false
+}
+
 // Custom dayjs constructor that automatically uses .tz() for all instances.
 // This ensures that dayjs() calls throughout the codebase honor the default
 // timezone set via dayjs.tz.setDefault().
 const timezoneAwareDayjs = (...args: unknown[]) => {
+	if (canUsePlainConstructor(args)) {
+		return dayjs(...(args as Parameters<typeof dayjs>))
+	}
 	return (dayjs as unknown as { tz: (...a: unknown[]) => dayjs.Dayjs }).tz(
 		...args
 	)
